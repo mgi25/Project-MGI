@@ -25,43 +25,33 @@ class AIClient:
         if not self.key:
             raise EnvironmentError(f"Missing {api_key_env}")
 
-    def _build_payload(self, features: Dict[str, Any]) -> Dict[str, Any]:
+    def decide(self, features: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         prompt = (
             "You are a trading decision engine. Return strict JSON: "
             "{action: buy|sell|flat, entry: float, sl: float, tp: float, confidence: 0-1}. "
-            "Use only provided features; never invent prices. Keep RR>=1.5 when possible.\n"
-            f"Features: {json.dumps(features, sort_keys=True)}"
+            "Use only provided features; never invent prices.\n"
+            f"Features: {json.dumps(features)}"
         )
-        return {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json"},
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                # IMPORTANT: snake_case key for AI Studio
+                "response_mime_type": "application/json"
+            },
         }
-
-    def decide(self, features: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if not features:
-            logger.debug("Skipping AI call: empty feature set")
-            return None
-
-        body = self._build_payload(features)
         for attempt in range(self.max_retries + 1):
             try:
-                response = requests.post(
+                r = requests.post(
                     self.url,
                     params={"key": self.key},
                     json=body,
                     timeout=self.timeout,
                 )
-                response.raise_for_status()
-                text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-                decision = json.loads(text)
-                if not isinstance(decision, dict):
-                    raise ValueError("Model response is not a JSON object")
-                return decision
-            except Exception as exc:  # noqa: BLE001 - keep broad for retries
+                r.raise_for_status()
+                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return json.loads(text)
+            except Exception as e:
                 logger.warning(
-                    "AI decide error (attempt {}/{}): {}",
-                    attempt + 1,
-                    self.max_retries + 1,
-                    exc,
+                    f"AI decide error (attempt {attempt}): {e}; payload={getattr(r, 'text', '')[:300]}"
                 )
         return None
