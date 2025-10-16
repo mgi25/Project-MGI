@@ -53,7 +53,11 @@ class Storage:
     def log_decision(self, record: "DecisionRecord") -> None:
         row = tuple(getattr(record, name) for name, _ in self.columns)
         placeholders = ",".join("?" for _ in self.columns)
-        self.db.execute(f"INSERT INTO decisions VALUES ({placeholders})", row)
+        columns = ",".join(name for name, _ in self.columns)
+        self.db.execute(
+            f"INSERT INTO decisions ({columns}) VALUES ({placeholders})",
+            row,
+        )
         self.db.commit()
 
         with open(self.csv_path, "a", newline="") as handle:
