@@ -14,6 +14,24 @@ risk:
   sl_max_points: 4000            # cap SL
   contract_size: 100.0           # approximate contract size for gold (tune per symbol)
 
+confirmations:
+  enabled: true
+  m5_trend: true
+  m15_context: false
+  atr_m1_bounds: [50, 1500]
+
+exits:
+  be_trigger_points: 80
+  trail_min_points: 150
+
+clamps:
+  atr_mult: 3
+  min_points: 150
+  max_points: 1500
+
+safety:
+  daily_max_loss_pct: 5.0
+
 sessions:
   enabled: true
   # Trading hours in broker time (HH:MM-HH:MM). Multiple ranges allowed.

@@ -3,9 +3,8 @@ from __future__ import annotations
 import csv
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -18,25 +17,31 @@ class Storage:
         Path(self.csv_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.db_path)
         self.db.row_factory = sqlite3.Row
-        self.db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS decisions(
-                ts TEXT,
-                price REAL,
-                rsi REAL,
-                atr_points REAL,
-                volume_spike REAL,
-                skew_z REAL,
-                spread_points INTEGER,
-                action TEXT,
-                entry REAL,
-                sl REAL,
-                tp REAL,
-                confidence REAL
-            )
-            """
+        self.columns: Tuple[Tuple[str, str], ...] = (
+            ("ts", "TEXT"),
+            ("price", "REAL"),
+            ("atr_points", "REAL"),
+            ("spread_points", "INTEGER"),
+            ("action", "TEXT"),
+            ("raw_entry", "REAL"),
+            ("raw_sl", "REAL"),
+            ("raw_tp", "REAL"),
+            ("entry", "REAL"),
+            ("sl", "REAL"),
+            ("tp", "REAL"),
+            ("lots", "REAL"),
+            ("rr", "REAL"),
+            ("confidence", "REAL"),
+            ("reason", "TEXT"),
+            ("sl_bound_low", "REAL"),
+            ("sl_bound_high", "REAL"),
+            ("tp_bound_low", "REAL"),
+            ("tp_bound_high", "REAL"),
         )
+        cols_sql = ",".join(f"{name} {col_type}" for name, col_type in self.columns)
+        self.db.execute(f"CREATE TABLE IF NOT EXISTS decisions({cols_sql})")
         self.db.commit()
+        self._ensure_columns()
         self._csv_header_written = Path(self.csv_path).exists()
 
     def close(self) -> None:
@@ -45,32 +50,49 @@ class Storage:
         except Exception:
             pass
 
-    def log_decision(self, features: Dict[str, float], decision: Optional[Dict[str, float]]) -> None:
-        decision = decision or {}
-        row = (
-            datetime.utcnow().isoformat(),
-            features.get("price"),
-            features.get("rsi"),
-            features.get("atr_points"),
-            features.get("volume_spike"),
-            features.get("skew_z"),
-            features.get("spread_points"),
-            decision.get("action"),
-            decision.get("entry"),
-            decision.get("sl"),
-            decision.get("tp"),
-            decision.get("confidence"),
-        )
-        self.db.execute("INSERT INTO decisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", row)
+    def log_decision(self, record: "DecisionRecord") -> None:
+        row = tuple(getattr(record, name) for name, _ in self.columns)
+        placeholders = ",".join("?" for _ in self.columns)
+        self.db.execute(f"INSERT INTO decisions VALUES ({placeholders})", row)
         self.db.commit()
 
         with open(self.csv_path, "a", newline="") as handle:
             writer = csv.writer(handle)
             if not self._csv_header_written:
-                headers = [col[1] for col in self.db.execute("PRAGMA table_info(decisions)")]
+                headers = [name for name, _ in self.columns]
                 writer.writerow(headers)
                 self._csv_header_written = True
             writer.writerow(row)
 
     def __del__(self) -> None:  # pragma: no cover - defensive close
         self.close()
+
+    def _ensure_columns(self) -> None:
+        existing = {row["name"] for row in self.db.execute("PRAGMA table_info(decisions)")}
+        for name, col_type in self.columns:
+            if name not in existing:
+                self.db.execute(f"ALTER TABLE decisions ADD COLUMN {name} {col_type}")
+        self.db.commit()
+
+
+@dataclass
+class DecisionRecord:
+    ts: str
+    price: Optional[float]
+    atr_points: Optional[float]
+    spread_points: Optional[int]
+    action: Optional[str]
+    raw_entry: Optional[float]
+    raw_sl: Optional[float]
+    raw_tp: Optional[float]
+    entry: Optional[float]
+    sl: Optional[float]
+    tp: Optional[float]
+    lots: Optional[float]
+    rr: Optional[float]
+    confidence: Optional[float]
+    reason: Optional[str]
+    sl_bound_low: Optional[float]
+    sl_bound_high: Optional[float]
+    tp_bound_low: Optional[float]
+    tp_bound_high: Optional[float]

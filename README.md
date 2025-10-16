@@ -12,8 +12,8 @@ risk-management rules, and forwards executable orders to the broker.
 
 - **Event-driven loop** — decisions are requested only on new bars and when market
   state changes, protecting the Gemma-3 free-tier quota.
-- **Guardrails before every order** — spread, session filters, risk/reward, cool-down,
-  and configurable stop-loss constraints are checked locally.
+- **Guardrails before every order** — spread, session filters, risk/reward, cooldown,
+  ATR-based clamps, daily loss kill-switch, and one-position policy are enforced locally.
 - **LLM constrained to JSON** — the language model only returns
   `{action, entry, sl, tp, confidence}`; order management remains fully deterministic
   inside the bot.
@@ -53,6 +53,10 @@ Key options from `config.yaml`:
 - `timeframe` — bar timeframe used for feature construction and decisions.
 - `action_interval_seconds` — minimum interval between LLM requests.
 - `risk` — spread limits, maximum risk per trade, and stop-loss bounds.
+- `confirmations` — multi-timeframe trend/volatility gates (ATR bounds, M5/M15 filters).
+- `clamps` — ATR-driven price guard that restricts LLM entries/SL/TP around market price.
+- `exits` — breakeven trigger and ATR trailing distance for live position management.
+- `safety` — daily maximum loss percentage (equity-based kill switch).
 - `sessions` — broker-time trading windows (supports overnight ranges).
 - `cooldowns.after_order_seconds` — cooldown between filled trades.
 - `ai` — Gemma model, endpoint, timeout, and retry policy.

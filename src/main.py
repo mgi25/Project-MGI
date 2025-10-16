@@ -4,9 +4,9 @@ import os
 import sys
 import time
 from contextlib import ExitStack
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import MetaTrader5 as mt5
 import yaml
@@ -14,13 +14,13 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from .ai_client import AIClient
-from .execution import Executor
-from .features import build_features
+from .execution import ExecutionResult, Executor
+from .features import build_all_features
 from .mt5_client import MT5Connection
 from .risk import Risk
-from .storage import Storage
-from .strategy import Policy
-from .utils import RateLimiter
+from .storage import DecisionRecord, Storage
+from .strategy import Policy, confirm_action, confirmations_ok
+from .utils import RateLimiter, now_utc_iso
 
 
 def load_config(path: str = "config.yaml") -> Dict[str, Any]:
@@ -50,6 +50,8 @@ def run() -> None:
 
     symbol = cfg["symbol"]
     timeframe = timeframe_from_cfg(cfg)
+    tf_m5 = getattr(mt5, "TIMEFRAME_M5", None)
+    tf_m15 = getattr(mt5, "TIMEFRAME_M15", None)
 
     with ExitStack() as stack:
         mt5_conn = MT5Connection(
@@ -64,7 +66,7 @@ def run() -> None:
 
         ai = AIClient(url=cfg["ai"]["url"], timeout=cfg["ai"]["timeout"], max_retries=cfg["ai"]["max_retries"])
         risk = Risk(cfg, digits, point, mt5_conn.account_equity)
-        executor = Executor(mt5_conn, risk)
+        executor = Executor(mt5_conn, risk, cfg, digits, point)
         storage = Storage(cfg["persistence"]["db_path"], cfg["persistence"]["csv_path"])
         stack.callback(storage.close)
         policy = Policy(cfg)
@@ -72,21 +74,45 @@ def run() -> None:
 
         logger.info("Bot started for {}", symbol)
 
+        daily_date: Optional[date] = None
+        daily_equity_start: float = 0.0
+        kill_switch_active = False
+
         try:
             while True:
                 loop_start = time.time()
 
-                bars = mt5_conn.get_bars(symbol, timeframe, cfg["lookback_bars"])
-                if bars.empty:
+                now_dt = datetime.now()
+                if daily_date != now_dt.date():
+                    daily_date = now_dt.date()
+                    daily_equity_start = mt5_conn.account_equity()
+                    kill_switch_active = False
+                    logger.info("Daily equity reset: {:.2f}", daily_equity_start)
+
+                features = build_all_features(
+                    mt5_conn,
+                    symbol,
+                    timeframe,
+                    tf_m5 if cfg.get("confirmations", {}).get("m5_trend", False) else None,
+                    tf_m15 if cfg.get("confirmations", {}).get("m15_context", False) else None,
+                    cfg,
+                )
+                if not features or not features.get("m1"):
                     time.sleep(1)
                     continue
 
-                last_bar_ts = str(bars.iloc[-1]["time"])
-                if not policy.new_bar(last_bar_ts):
+                positions = mt5_conn.positions(symbol)
+                if positions:
+                    executor.manage_position(positions[0], features)
                     time.sleep(1)
                     continue
 
-                spread = mt5_conn.current_spread_points(symbol)
+                last_bar_ts = features["m1"].get("time")
+                if last_bar_ts and not policy.new_bar(last_bar_ts):
+                    time.sleep(1)
+                    continue
+
+                spread = int(features.get("meta", {}).get("spread_points", 0))
                 if not risk.within_spread(spread):
                     time.sleep(1)
                     continue
@@ -100,25 +126,77 @@ def run() -> None:
                     time.sleep(1)
                     continue
 
-                features = build_features(bars, spread, digits, point, cfg)
-                if not features:
+                conf_ok, conf_reason = confirmations_ok(features, cfg)
+                if not conf_ok:
+                    logger.debug("Confirmations blocked: {}", conf_reason)
                     time.sleep(1)
                     continue
+
+                equity = mt5_conn.account_equity()
+                safety_cfg = cfg.get("safety", {})
+                max_daily_loss = float(safety_cfg.get("daily_max_loss_pct", 100.0))
+                if daily_equity_start > 0:
+                    dd_pct = (equity - daily_equity_start) / daily_equity_start * 100.0
+                    if dd_pct <= -max_daily_loss:
+                        if not kill_switch_active:
+                            logger.warning(
+                                "Daily loss {:.2f}% beyond limit {:.2f}% — blocking new entries",
+                                dd_pct,
+                                max_daily_loss,
+                            )
+                            kill_switch_active = True
+                        time.sleep(1)
+                        continue
+                else:
+                    dd_pct = 0.0
 
                 if not limiter.allow(now=loop_start):
                     time.sleep(1)
                     continue
 
-                decision = ai.decide(features)
-                storage.log_decision(features, decision)
+                decision = ai.decide(_ai_payload(features))
+                decision_result: Optional[ExecutionResult] = None
+                reason = ""
 
-                if decision:
-                    try:
-                        ticket = executor.place_from_decision(symbol, decision, digits)
-                        if ticket:
-                            policy.mark_order_sent(loop_start)
-                    except Exception as exc:  # noqa: BLE001 - trading errors should not stop the loop
-                        logger.error("Execution error: {}", exc)
+                if decision is None:
+                    reason = "ai_error"
+                else:
+                    action = decision.get("action", "flat")
+                    align_ok, align_reason = confirm_action(action, features, cfg)
+                    if not align_ok and action != "flat":
+                        reason = f"confirm:{align_reason}"
+                        decision_result = ExecutionResult(
+                            False,
+                            None,
+                            reason,
+                            action,
+                            decision,
+                            None,
+                            None,
+                            None,
+                            0.0,
+                            0.0,
+                            0.0,
+                            None,
+                            None,
+                        )
+                    else:
+                        try:
+                            decision_result = executor.place_from_decision(
+                                symbol,
+                                decision,
+                                features,
+                                position_open=False,
+                            )
+                            if decision_result.sent and decision_result.ticket:
+                                policy.mark_order_sent(loop_start)
+                        except Exception as exc:  # noqa: BLE001 - keep loop alive
+                            logger.error("Execution error: {}", exc)
+                            reason = f"execution_error:{exc}"
+
+                record = _build_record(features, decision, decision_result, reason)
+                storage.log_decision(record)
+                _log_decision_line(record, decision_result, spread)
 
                 elapsed = time.time() - loop_start
                 if elapsed < 1:
@@ -131,3 +209,79 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
+
+
+def _ai_payload(features: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "m1": {
+            "price": features["m1"].get("price"),
+            "atr_points": features["m1"].get("atr_points"),
+            "rsi": features["m1"].get("rsi"),
+            "ema50": features["m1"].get("ema50"),
+        },
+        "spread_points": features.get("meta", {}).get("spread_points"),
+    }
+    if "m5" in features:
+        payload["m5"] = {
+            "ema50": features["m5"].get("ema50"),
+            "rsi": features["m5"].get("rsi"),
+        }
+    if "m15" in features:
+        payload["m15"] = {
+            "ema50": features["m15"].get("ema50"),
+            "rsi": features["m15"].get("rsi"),
+        }
+    return payload
+
+
+def _build_record(
+    features: Dict[str, Any],
+    decision: Optional[Dict[str, Any]],
+    result: Optional[ExecutionResult],
+    fallback_reason: str,
+) -> DecisionRecord:
+    decision = decision or {}
+    m1 = features.get("m1", {})
+    meta = features.get("meta", {})
+    reason = fallback_reason or (result.reason if result else "")
+    return DecisionRecord(
+        ts=now_utc_iso(),
+        price=m1.get("price"),
+        atr_points=m1.get("atr_points"),
+        spread_points=meta.get("spread_points"),
+        action=decision.get("action"),
+        raw_entry=decision.get("entry"),
+        raw_sl=decision.get("sl"),
+        raw_tp=decision.get("tp"),
+        entry=result.entry if result else None,
+        sl=result.sl if result else None,
+        tp=result.tp if result else None,
+        lots=result.lots if result else 0.0,
+        rr=result.rr if result else 0.0,
+        confidence=decision.get("confidence"),
+        reason=reason,
+        sl_bound_low=(result.sl_bounds[0] if result and result.sl_bounds else None),
+        sl_bound_high=(result.sl_bounds[1] if result and result.sl_bounds else None),
+        tp_bound_low=(result.tp_bounds[0] if result and result.tp_bounds else None),
+        tp_bound_high=(result.tp_bounds[1] if result and result.tp_bounds else None),
+    )
+
+
+def _log_decision_line(
+    record: DecisionRecord,
+    result: Optional[ExecutionResult],
+    spread_points: int,
+) -> None:
+    logger.info(
+        "decision|ts={} action={} entry={} sl={} tp={} rr={:.2f} spread_pts={} atr_pts={} lots={} reason={}",
+        record.ts,
+        record.action,
+        record.entry,
+        record.sl,
+        record.tp,
+        (result.rr if result else 0.0),
+        spread_points,
+        record.atr_points,
+        record.lots,
+        record.reason,
+    )
