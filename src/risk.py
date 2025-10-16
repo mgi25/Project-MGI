@@ -22,28 +22,43 @@ class Risk:
         return ok
 
     # -- volume ----------------------------------------------------------
-    def compute_volume(self, entry: float, sl: float) -> float:
+    def compute_volume(self, sl_points: float) -> float:
         equity = self.equity_fn()
         risk_cash = equity * self.cfg["risk"]["risk_per_trade"]
-        sl_points = max(int(abs(entry - sl) / self.point), self.cfg["risk"]["sl_min_points"])
-        sl_points = min(sl_points, self.cfg["risk"]["sl_max_points"])
         if sl_points <= 0 or risk_cash <= 0:
             return 0.0
 
-        tick_value_per_lot = self.contract_size * self.point
-        lots = risk_cash / (sl_points * tick_value_per_lot)
-        lots = max(0.01, round(lots, 2))
-        return lots
+        usd_per_point_per_lot = self.contract_size * self.point
+        lots = risk_cash / (sl_points * usd_per_point_per_lot)
+        lot_step = float(self.cfg["risk"].get("lot_step", 0.01))
+        lots = max(lot_step, round(lots / lot_step) * lot_step)
+        return round(lots, 2)
+
+    def sl_points_ok(self, sl_points: float) -> bool:
+        min_sl = float(self.cfg["risk"]["sl_min_points"])
+        max_sl = float(self.cfg["risk"]["sl_max_points"])
+        if sl_points < min_sl:
+            logger.info("Blocked: SL distance {:.1f} < min {}", sl_points, min_sl)
+            return False
+        if sl_points > max_sl:
+            logger.info("Blocked: SL distance {:.1f} > max {}", sl_points, max_sl)
+            return False
+        return True
 
     # -- rr --------------------------------------------------------------
-    def rr_ok(self, entry: float, sl: float, tp: float) -> bool:
+    def rr(self, entry: float, sl: float, tp: float) -> float:
         risk = abs(entry - sl)
         reward = abs(tp - entry)
         if risk <= 0 or reward <= 0:
+            return 0.0
+        return reward / risk
+
+    def rr_ok(self, entry: float, sl: float, tp: float) -> bool:
+        ratio = self.rr(entry, sl, tp)
+        if ratio <= 0:
             logger.info("Blocked: invalid SL/TP distances")
             return False
-        rr = reward / risk
-        if rr < self.cfg["risk"]["rr_min"]:
-            logger.info("Blocked: RR {:.2f} below threshold", rr)
+        if ratio < self.cfg["risk"]["rr_min"]:
+            logger.info("Blocked: RR {:.2f} below threshold", ratio)
             return False
         return True

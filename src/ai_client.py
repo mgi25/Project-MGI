@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 import requests
 from loguru import logger
 
+from .utils import now_utc_iso
+
 
 class AIClient:
     """Thin wrapper over Google AI Studio's Gemma models."""
@@ -27,31 +29,89 @@ class AIClient:
 
     def decide(self, features: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         prompt = (
-            "You are a trading decision engine. Return strict JSON: "
-            "{action: buy|sell|flat, entry: float, sl: float, tp: float, confidence: 0-1}. "
-            "Use only provided features; never invent prices.\n"
-            f"Features: {json.dumps(features)}"
+            "You are a risk-aware MT5 trading assistant. Return ONLY a JSON object "
+            "with the keys action, entry, sl, tp, confidence. No prose, no code "
+            "fences. Use the market features verbatim; never speculate prices.\n"
+            f"Features: {json.dumps(features, separators=(',', ':'))}"
         )
         body = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {
-                # IMPORTANT: snake_case key for AI Studio
-                "response_mime_type": "application/json"
+                "temperature": 0.2,
+                "maxOutputTokens": 256,
             },
         }
         for attempt in range(self.max_retries + 1):
             try:
-                r = requests.post(
+                response = requests.post(
                     self.url,
                     params={"key": self.key},
                     json=body,
                     timeout=self.timeout,
                 )
-                r.raise_for_status()
-                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return json.loads(text)
-            except Exception as e:
+                response.raise_for_status()
+                text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+                decision = self._parse_decision(text)
+                logger.bind(event="ai_raw").info("{} | raw_decision={}", now_utc_iso(), text.strip())
+                if decision:
+                    logger.bind(event="ai_parsed").info("{} | parsed_decision={}", now_utc_iso(), decision)
+                return decision
+            except Exception as exc:  # noqa: BLE001
+                payload_preview = ""
+                if "response" in locals():
+                    payload_preview = getattr(response, "text", "")[:300]
                 logger.warning(
-                    f"AI decide error (attempt {attempt}): {e}; payload={getattr(r, 'text', '')[:300]}"
+                    "AI decide error (attempt {}): {} | payload={}",
+                    attempt,
+                    exc,
+                    payload_preview,
                 )
         return None
+
+    def _parse_decision(self, text: str) -> Optional[Dict[str, Any]]:
+        import re
+
+        if not text:
+            return None
+
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            logger.warning("AI response missing JSON object: {}", text[:120])
+            return None
+
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError as exc:
+            logger.warning("AI JSON decode error: {}", exc)
+            return None
+
+        required = {"action", "entry", "sl", "tp", "confidence"}
+        if not required.issubset(payload):
+            logger.warning("AI decision missing keys: {}", payload)
+            return None
+
+        action = str(payload["action"]).lower()
+        if action not in {"buy", "sell", "flat"}:
+            logger.warning("AI decision invalid action: {}", payload["action"])
+            return None
+
+        try:
+            entry = float(payload["entry"])
+            sl = float(payload["sl"])
+            tp = float(payload["tp"])
+            confidence = float(payload["confidence"])
+        except (TypeError, ValueError):
+            logger.warning("AI decision has non-numeric prices: {}", payload)
+            return None
+
+        if not 0.0 <= confidence <= 1.0:
+            logger.warning("AI decision confidence out of range: {}", confidence)
+            return None
+
+        return {
+            "action": action,
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+            "confidence": confidence,
+        }
