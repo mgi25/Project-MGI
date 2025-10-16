@@ -66,6 +66,7 @@ def _build_m1_features(
     point: float,
     digits: int,
     cfg: Mapping[str, Mapping[str, int]],
+    spread_points: float,
 ) -> Dict[str, Any]:
     if len(df) < _min_required_bars(cfg):
         return {}
@@ -83,11 +84,22 @@ def _build_m1_features(
     df["r1"] = df["close"].pct_change(1)
     df["r3"] = df["close"].pct_change(3)
     df["r10"] = df["close"].pct_change(10)
+    if "tick_volume" in df.columns:
+        df["vol_sma"] = df["tick_volume"].rolling(20).mean()
+        df["vol_std"] = df["tick_volume"].rolling(20).std()
+        df["vol_z"] = (df["tick_volume"] - df["vol_sma"]) / (df["vol_std"] + 1e-9)
+    else:
+        df["vol_sma"] = 0.0
+        df["vol_std"] = 0.0
+        df["vol_z"] = 0.0
     df["volume_rel"] = df["volume_rel"].replace([np.inf, -np.inf], np.nan).fillna(1.0)
     df["skew"] = df["skew"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    df[["ema9", "ema21", "r1", "r3", "r10"]] = df[["ema9", "ema21", "r1", "r3", "r10"]].replace([np.inf, -np.inf], np.nan)
-    df[["ema9", "ema21"]] = df[["ema9", "ema21"]].fillna(method="bfill").fillna(method="ffill")
+    df[["ema9", "ema21", "r1", "r3", "r10", "vol_sma", "vol_std", "vol_z"]] = df[
+        ["ema9", "ema21", "r1", "r3", "r10", "vol_sma", "vol_std", "vol_z"]
+    ].replace([np.inf, -np.inf], np.nan)
+    df[["ema9", "ema21"]] = df[["ema9", "ema21"]].bfill().ffill()
     df[["r1", "r3", "r10"]] = df[["r1", "r3", "r10"]].fillna(0.0)
+    df["vol_z"] = df["vol_z"].fillna(0.0)
 
     last = df.iloc[-1]
     point_value = point or 10 ** -digits
@@ -104,6 +116,7 @@ def _build_m1_features(
         "ema50": float(last["ema50"]),
         "volume_rel": float(last["volume_rel"]),
         "skew": float(last["skew"]),
+        "spread_points": float(spread_points or 0.0),
     }
     features_out.update(
         {
@@ -113,6 +126,7 @@ def _build_m1_features(
             "r1": float(last["r1"]),
             "r3": float(last["r3"]),
             "r10": float(last["r10"]),
+            "vol_z": float(last["vol_z"]),
         }
     )
     return features_out
@@ -150,12 +164,13 @@ def build_all_features(
         return {}
 
     features: Dict[str, Any] = {
-        "m1": _build_m1_features(m1_bars, point, digits, cfg),
+        "m1": _build_m1_features(m1_bars, point, digits, cfg, spread_points),
         "meta": {
             "digits": digits,
             "point": point,
             "spread_points": spread_points,
         },
+        "_m1_df": m1_bars,
     }
 
     if cfg.get("confirmations", {}).get("enabled", True):
