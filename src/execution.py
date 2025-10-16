@@ -59,7 +59,20 @@ class Executor:
         rounded_sl = round(sl, digits)
         rounded_tp = round(tp, digits) if tp is not None else None
 
-        lots = self.risk.compute_volume(market_price, rounded_sl, info)
+        risk_multiplier = self._to_optional_float(decision.get("risk_multiplier"))
+        risk_pct = self._to_optional_float(decision.get("risk_pct") or decision.get("risk_percent"))
+        fixed_lots = self._to_optional_float(
+            decision.get("lots") or decision.get("lot") or decision.get("volume")
+        )
+
+        lots = self.risk.compute_volume(
+            market_price,
+            rounded_sl,
+            info,
+            risk_multiplier=risk_multiplier,
+            risk_pct=risk_pct,
+            fixed_lots=fixed_lots,
+        )
         if lots <= 0:
             return ExecutionResult(False, None, "lot_size", action, decision, market_price, rounded_sl, rounded_tp, 0.0, 0.0, 0.0)
 

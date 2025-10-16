@@ -135,6 +135,8 @@ def run() -> None:
                     continue
 
                 equity = mt5_conn.account_equity()
+                balance = mt5_conn.account_balance()
+                free_margin = mt5_conn.account_free_margin()
                 safety_cfg = cfg.get("safety", {})
                 max_daily_loss = float(safety_cfg.get("daily_max_loss_pct", 100.0))
                 if daily_equity_start > 0:
@@ -156,7 +158,17 @@ def run() -> None:
                     time.sleep(1)
                     continue
 
-                decision = ai.decide_entry(_ai_payload(features))
+                decision = ai.decide_entry(
+                    _ai_payload(
+                        features,
+                        {
+                            "equity": equity,
+                            "balance": balance,
+                            "free_margin": free_margin,
+                        },
+                        cfg.get("risk", {}),
+                    )
+                )
                 MIN_CONF = 0.45  # start low to activate; tune to 0.55–0.60 later
                 if decision and decision.get("action") in ("buy", "sell"):
                     try:
@@ -218,7 +230,11 @@ def run() -> None:
             logger.info("Bot stopped")
 
 
-def _ai_payload(features: Dict[str, Any]) -> Dict[str, Any]:
+def _ai_payload(
+    features: Dict[str, Any],
+    account: Dict[str, float],
+    risk_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "m1": {
             "price": features["m1"].get("price"),
@@ -242,6 +258,17 @@ def _ai_payload(features: Dict[str, Any]) -> Dict[str, Any]:
             "spread_points": features.get("meta", {}).get("spread_points"),
             "point": features.get("meta", {}).get("point"),
             "digits": features.get("meta", {}).get("digits"),
+        },
+        "account": {
+            "equity": account.get("equity"),
+            "balance": account.get("balance"),
+            "free_margin": account.get("free_margin"),
+        },
+        "risk": {
+            "base_risk_per_trade": risk_cfg.get("risk_per_trade"),
+            "max_spread_points": risk_cfg.get("max_spread_points"),
+            "contract_size": risk_cfg.get("contract_size"),
+            "max_risk_pct": risk_cfg.get("max_risk_pct"),
         },
     }
     if "m5" in features:
