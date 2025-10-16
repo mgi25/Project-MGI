@@ -140,3 +140,16 @@ class MT5Connection(AbstractContextManager["MT5Connection"]):
     def account_equity(self) -> float:
         acc = mt5.account_info()
         return float(acc.equity) if acc else 0.0
+
+    def symbol_tick(self, symbol: str):
+        return self._symbol_tick(symbol)
+
+    def positions(self, symbol: Optional[str] = None):
+        if symbol:
+            positions = mt5.positions_get(symbol=symbol)
+        else:
+            positions = mt5.positions_get()
+        return positions or []
+
+    def has_open_position(self, symbol: str) -> bool:
+        return bool(self.positions(symbol))
