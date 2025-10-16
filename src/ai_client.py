@@ -161,12 +161,10 @@ class AIClient:
 
     def decide_entry(self, features: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         prompt = (
-            "You analyse the provided MT5 market features and decide whether to open a trade.\n"
-            "Return ONLY a JSON object with keys action, entry, sl, tp, confidence.\n"
-            "- action must be one of buy, sell, flat.\n"
-            "- Use numeric prices in the symbol's terms.\n"
-            "- If no trade, set action=flat and other fields to null.\n"
-            "- Confidence must be between 0 and 1.\n"
+            "You are a live MT5 trading assistant for M1 entries.\n"
+            "Return ONLY JSON: {action: buy|sell|flat, entry: float|null, sl: float|null, tp: float|null, confidence: 0..1}.\n"
+            "Bias toward BUY or SELL when there is any directional edge; use FLAT only when signals conflict or are truly absent.\n"
+            "Keep entry near current price; place SL/TP where your edge is meaningful. Confidence reflects edge (0..1).\n"
             f"Features: {json.dumps(features, separators=(',', ':'))}"
         )
 

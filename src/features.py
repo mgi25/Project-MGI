@@ -77,14 +77,23 @@ def _build_m1_features(
     df["ema50"] = ema(df["close"], 50)
     df["volume_rel"] = volume_spike(df["tick_volume"], feature_cfg["vol_window"])
     df["skew"] = close_skew(df["close"], feature_cfg["skew_window"])
+    # EMAs and short momentum
+    df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
+    df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
+    df["r1"] = df["close"].pct_change(1)
+    df["r3"] = df["close"].pct_change(3)
+    df["r10"] = df["close"].pct_change(10)
     df["volume_rel"] = df["volume_rel"].replace([np.inf, -np.inf], np.nan).fillna(1.0)
     df["skew"] = df["skew"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    df[["ema9", "ema21", "r1", "r3", "r10"]] = df[["ema9", "ema21", "r1", "r3", "r10"]].replace([np.inf, -np.inf], np.nan)
+    df[["ema9", "ema21"]] = df[["ema9", "ema21"]].fillna(method="bfill").fillna(method="ffill")
+    df[["r1", "r3", "r10"]] = df[["r1", "r3", "r10"]].fillna(0.0)
 
     last = df.iloc[-1]
     point_value = point or 10 ** -digits
     atr_points = float(last["atr"]) / point_value
 
-    return {
+    features_out = {
         "time": str(last["time"]),
         "price": float(last["close"]),
         "open": float(last["open"]),
@@ -96,6 +105,17 @@ def _build_m1_features(
         "volume_rel": float(last["volume_rel"]),
         "skew": float(last["skew"]),
     }
+    features_out.update(
+        {
+            "ema9": float(last["ema9"]),
+            "ema21": float(last["ema21"]),
+            "ema_gap": float(last["ema9"] - last["ema21"]),
+            "r1": float(last["r1"]),
+            "r3": float(last["r3"]),
+            "r10": float(last["r10"]),
+        }
+    )
+    return features_out
 
 
 def _build_higher_tf_features(df: pd.DataFrame) -> Dict[str, float]:

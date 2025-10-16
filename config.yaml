@@ -13,7 +13,7 @@ risk:
   contract_size: 100.0           # approximate contract size for gold (tune per symbol)
 
 confirmations:
-  enabled: true
+  enabled: false
   m5_trend: true
   m15_context: false
   atr_m1_bounds: [200, 8000]
