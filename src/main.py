@@ -157,6 +157,15 @@ def run() -> None:
                     continue
 
                 decision = ai.decide_entry(_ai_payload(features))
+                MIN_CONF = 0.45  # start low to activate; tune to 0.55–0.60 later
+                if decision and decision.get("action") in ("buy", "sell"):
+                    try:
+                        conf = float(decision.get("confidence", 0))
+                    except (TypeError, ValueError):
+                        conf = 0.0
+                    if conf < MIN_CONF:
+                        # downgrade to flat to stay safe
+                        decision = {"action": "flat", "entry": None, "sl": None, "tp": None, "confidence": conf}
                 decision_result: Optional[ExecutionResult] = None
                 reason = ""
 
@@ -219,8 +228,14 @@ def _ai_payload(features: Dict[str, Any]) -> Dict[str, Any]:
             "atr_points": features["m1"].get("atr_points"),
             "rsi": features["m1"].get("rsi"),
             "ema50": features["m1"].get("ema50"),
+            "ema9": features["m1"].get("ema9"),
+            "ema21": features["m1"].get("ema21"),
+            "ema_gap": features["m1"].get("ema_gap"),
             "volume_rel": features["m1"].get("volume_rel"),
             "skew": features["m1"].get("skew"),
+            "r1": features["m1"].get("r1"),
+            "r3": features["m1"].get("r3"),
+            "r10": features["m1"].get("r10"),
         },
         "spread_points": features.get("meta", {}).get("spread_points"),
         "meta": {
