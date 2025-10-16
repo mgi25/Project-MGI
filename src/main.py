@@ -15,7 +15,7 @@ from loguru import logger
 
 from .ai_client import AIClient
 from .execution import ExecutionResult, Executor
-from .features import build_all_features
+from .features import build_all_features, build_management_state
 from .mt5_client import MT5Connection
 from .risk import Risk
 from .storage import DecisionRecord, Storage
@@ -103,7 +103,9 @@ def run() -> None:
 
                 positions = mt5_conn.positions(symbol)
                 if positions:
-                    executor.manage_position(positions[0], features)
+                    state = build_management_state(mt5_conn, positions[0], features)
+                    if state:
+                        executor.manage_with_ai(symbol, positions[0], state, ai)
                     time.sleep(1)
                     continue
 
@@ -154,7 +156,7 @@ def run() -> None:
                     time.sleep(1)
                     continue
 
-                decision = ai.decide(_ai_payload(features))
+                decision = ai.decide_entry(_ai_payload(features))
                 decision_result: Optional[ExecutionResult] = None
                 reason = ""
 
@@ -196,7 +198,7 @@ def run() -> None:
 
                 record = _build_record(features, decision, decision_result, reason)
                 storage.log_decision(record)
-                _log_decision_line(record, decision_result, spread)
+                _log_decision_line(record, spread)
 
                 elapsed = time.time() - loop_start
                 if elapsed < 1:
@@ -211,11 +213,21 @@ def _ai_payload(features: Dict[str, Any]) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "m1": {
             "price": features["m1"].get("price"),
+            "open": features["m1"].get("open"),
+            "high": features["m1"].get("high"),
+            "low": features["m1"].get("low"),
             "atr_points": features["m1"].get("atr_points"),
             "rsi": features["m1"].get("rsi"),
             "ema50": features["m1"].get("ema50"),
+            "volume_rel": features["m1"].get("volume_rel"),
+            "skew": features["m1"].get("skew"),
         },
         "spread_points": features.get("meta", {}).get("spread_points"),
+        "meta": {
+            "spread_points": features.get("meta", {}).get("spread_points"),
+            "point": features.get("meta", {}).get("point"),
+            "digits": features.get("meta", {}).get("digits"),
+        },
     }
     if "m5" in features:
         payload["m5"] = {
@@ -256,30 +268,28 @@ def _build_record(
         rr=result.rr if result else 0.0,
         confidence=decision.get("confidence"),
         reason=reason,
-        sl_bound_low=(result.sl_bounds[0] if result and result.sl_bounds else None),
-        sl_bound_high=(result.sl_bounds[1] if result and result.sl_bounds else None),
-        tp_bound_low=(result.tp_bounds[0] if result and result.tp_bounds else None),
-        tp_bound_high=(result.tp_bounds[1] if result and result.tp_bounds else None),
+        sl_bound_low=None,
+        sl_bound_high=None,
+        tp_bound_low=None,
+        tp_bound_high=None,
     )
 
 
 def _log_decision_line(
     record: DecisionRecord,
-    result: Optional[ExecutionResult],
     spread_points: int,
 ) -> None:
+    price = record.entry if record.entry is not None else record.price
     logger.info(
-        "decision|ts={} action={} entry={} sl={} tp={} rr={:.2f} spread_pts={} atr_pts={} lots={} reason={}",
+        "decision|ts={} action={} price={} sl={} tp={} spread_pts={} lots={} reason={}",
         record.ts,
         record.action,
-        record.entry,
+        price,
         record.sl,
         record.tp,
-        (result.rr if result else 0.0),
         spread_points,
-        record.atr_points,
         record.lots,
-        record.reason,
+        record.reason or "",
     )
 
 

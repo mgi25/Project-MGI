@@ -129,6 +129,29 @@ class MT5Connection(AbstractContextManager["MT5Connection"]):
         r = mt5.order_send(request)
         return bool(r and r.retcode == mt5.TRADE_RETCODE_DONE)
 
+    def close_position(self, ticket: int) -> bool:
+        positions = mt5.positions_get(ticket=ticket)
+        if not positions:
+            return False
+        pos = positions[0]
+        tick = self._symbol_tick(pos.symbol)
+        price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+        order_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": ticket,
+            "symbol": pos.symbol,
+            "volume": pos.volume,
+            "type": order_type,
+            "price": price,
+            "deviation": 30,
+            "magic": 20251016,
+            "comment": "gemma-3-close",
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        result = mt5.order_send(request)
+        return bool(result and result.retcode == mt5.TRADE_RETCODE_DONE)
+
     def current_spread_points(self, symbol: str) -> int:
         info = mt5.symbol_info(symbol)
         tick = mt5.symbol_info_tick(symbol)

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, Mapping
 
+import MetaTrader5 as mt5
 import numpy as np
 import pandas as pd
 
@@ -73,6 +75,10 @@ def _build_m1_features(
     df["rsi"] = rsi(df["close"], feature_cfg["rsi_period"])
     df["atr"] = atr(df, feature_cfg["atr_period"])
     df["ema50"] = ema(df["close"], 50)
+    df["volume_rel"] = volume_spike(df["tick_volume"], feature_cfg["vol_window"])
+    df["skew"] = close_skew(df["close"], feature_cfg["skew_window"])
+    df["volume_rel"] = df["volume_rel"].replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    df["skew"] = df["skew"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     last = df.iloc[-1]
     point_value = point or 10 ** -digits
@@ -81,9 +87,14 @@ def _build_m1_features(
     return {
         "time": str(last["time"]),
         "price": float(last["close"]),
+        "open": float(last["open"]),
+        "high": float(last["high"]),
+        "low": float(last["low"]),
         "atr_points": float(max(atr_points, 0.0)),
         "rsi": float(last["rsi"]),
         "ema50": float(last["ema50"]),
+        "volume_rel": float(last["volume_rel"]),
+        "skew": float(last["skew"]),
     }
 
 
@@ -136,3 +147,42 @@ def build_all_features(
             features["m15"] = _build_higher_tf_features(m15_bars)
 
     return features
+
+
+def build_management_state(mt5c, position, features: Mapping[str, Any]) -> Dict[str, Any]:
+    try:
+        tick = mt5c.symbol_tick(position.symbol)
+    except Exception:  # noqa: BLE001
+        return {}
+
+    now = datetime.now(timezone.utc)
+    opened = datetime.fromtimestamp(getattr(position, "time", 0), tz=timezone.utc)
+    time_in_trade = max((now - opened).total_seconds(), 0.0)
+
+    side = "buy" if position.type == mt5.POSITION_TYPE_BUY else "sell"
+    sl_value = position.sl if position.sl not in (None, 0.0) else None
+    tp_value = position.tp if position.tp not in (None, 0.0) else None
+
+    m1 = features.get("m1", {})
+    meta = features.get("meta", {})
+
+    state: Dict[str, Any] = {
+        "ticket": getattr(position, "ticket", None),
+        "side": side,
+        "open_price": float(position.price_open),
+        "volume": float(position.volume),
+        "current_bid": float(tick.bid),
+        "current_ask": float(tick.ask),
+        "sl": float(sl_value) if sl_value is not None else None,
+        "tp": float(tp_value) if tp_value is not None else None,
+        "unrealized_pnl": float(getattr(position, "profit", 0.0)),
+        "spread_points": int(meta.get("spread_points", 0) or 0),
+        "time_in_trade_sec": time_in_trade,
+    }
+
+    if m1:
+        state["atr_points"] = float(m1.get("atr_points", 0.0) or 0.0)
+        state["rsi"] = float(m1.get("rsi", 0.0) or 0.0)
+        state["price"] = float(m1.get("price", 0.0) or 0.0)
+
+    return state
