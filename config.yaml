@@ -28,10 +28,11 @@ persistence:
   csv_path: data/trades.csv
 
 ai:
-  model: gemma-3-12b-instruct
-  url: https://generativelanguage.googleapis.com/v1beta/models/gemma-3-12b-instruct:generateContent
+  model: gemma-3-12b-it
+  url: https://generativelanguage.googleapis.com/v1beta/models/gemma-3-12b-it:generateContent
   timeout: 8
   max_retries: 2
+
 
 features:
   atr_period: 14
