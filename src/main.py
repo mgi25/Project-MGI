@@ -207,10 +207,6 @@ def run() -> None:
             logger.info("Bot stopped")
 
 
-if __name__ == "__main__":
-    run()
-
-
 def _ai_payload(features: Dict[str, Any]) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "m1": {
@@ -285,3 +281,7 @@ def _log_decision_line(
         record.lots,
         record.reason,
     )
+
+
+if __name__ == "__main__":
+    run()
