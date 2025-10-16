@@ -164,6 +164,14 @@ class MT5Connection(AbstractContextManager["MT5Connection"]):
         acc = mt5.account_info()
         return float(acc.equity) if acc else 0.0
 
+    def account_balance(self) -> float:
+        acc = mt5.account_info()
+        return float(acc.balance) if acc else 0.0
+
+    def account_free_margin(self) -> float:
+        acc = mt5.account_info()
+        return float(acc.margin_free) if acc else 0.0
+
     def symbol_tick(self, symbol: str):
         return self._symbol_tick(symbol)
 

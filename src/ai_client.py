@@ -79,6 +79,16 @@ class AIClient:
         entry = self._to_optional_float(payload.get("entry"))
         sl = self._to_optional_float(payload.get("sl"))
         tp = self._to_optional_float(payload.get("tp"))
+        risk_multiplier = self._to_optional_float(payload.get("risk_multiplier"))
+        risk_pct = self._to_optional_float(payload.get("risk_pct") or payload.get("risk_percent"))
+        lots = self._to_optional_float(payload.get("lots") or payload.get("lot") or payload.get("volume"))
+
+        if risk_multiplier is not None and risk_multiplier < 0:
+            risk_multiplier = 0.0
+        if risk_pct is not None and risk_pct < 0:
+            risk_pct = 0.0
+        if lots is not None and lots < 0:
+            lots = 0.0
 
         if action == "flat":
             return {
@@ -87,6 +97,9 @@ class AIClient:
                 "sl": None,
                 "tp": None,
                 "confidence": confidence,
+                "risk_multiplier": risk_multiplier,
+                "risk_pct": risk_pct,
+                "lots": lots,
             }
 
         return {
@@ -95,6 +108,9 @@ class AIClient:
             "sl": sl,
             "tp": tp,
             "confidence": confidence,
+            "risk_multiplier": risk_multiplier,
+            "risk_pct": risk_pct,
+            "lots": lots,
         }
 
     def _validate_management(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -162,9 +178,10 @@ class AIClient:
     def decide_entry(self, features: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         prompt = (
             "You are a live MT5 trading assistant for M1 entries.\n"
-            "Return ONLY JSON: {action: buy|sell|flat, entry: float|null, sl: float|null, tp: float|null, confidence: 0..1}.\n"
+            "Return ONLY JSON: {action: buy|sell|flat, entry: float|null, sl: float|null, tp: float|null, confidence: 0..1, risk_multiplier?: float>=0, risk_pct?: float>=0, lots?: float>=0}.\n"
             "Bias toward BUY or SELL when there is any directional edge; use FLAT only when signals conflict or are truly absent.\n"
             "Keep entry near current price; place SL/TP where your edge is meaningful. Confidence reflects edge (0..1).\n"
+            "Use risk_multiplier to scale the configured base risk, risk_pct to set an absolute equity percentage, or lots to request a specific volume. Leave them absent to use defaults.\n"
             f"Features: {json.dumps(features, separators=(',', ':'))}"
         )
 
