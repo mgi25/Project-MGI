@@ -1,0 +1,40 @@
+symbol: XAUUSDm
+
+timeframe: M1        # bar timeframe for features/decisions
+lookback_bars: 200   # for indicators (ATR/RSI/vol)
+
+action_interval_seconds: 5       # minimum seconds between LLM calls
+new_bar_only: true               # call LLM only on new bar close
+
+risk:
+  max_spread_points: 300         # e.g., 30 pips if digits=3 (tune to broker)
+  risk_per_trade: 0.005          # 0.5% of equity
+  rr_min: 1.5                    # minimum risk-reward
+  sl_min_points: 150             # avoid ultra-tight SLs
+  sl_max_points: 4000            # cap SL
+  contract_size: 100.0           # approximate contract size for gold (tune per symbol)
+
+sessions:
+  enabled: true
+  # Trading hours in broker time (HH:MM-HH:MM). Multiple ranges allowed.
+  windows:
+    - "00:05-23:55"
+
+cooldowns:
+  after_order_seconds: 20
+
+persistence:
+  db_path: data/trades.sqlite
+  csv_path: data/trades.csv
+
+ai:
+  model: gemma-3-12b-instruct
+  url: https://generativelanguage.googleapis.com/v1beta/models/gemma-3-12b-instruct:generateContent
+  timeout: 8
+  max_retries: 2
+
+features:
+  atr_period: 14
+  rsi_period: 14
+  vol_window: 20
+  skew_window: 30
