@@ -48,3 +48,20 @@ features:
   rsi_period: 14
   vol_window: 20
   skew_window: 30
+expectancy:
+  enabled: true
+  horizon_bars: 5
+  threshold_long: 0.55
+  threshold_short: 0.55
+  min_expected_rr: 0.10
+
+risk_overlays:
+  max_consecutive_losses: 3
+  post_loss_cooldown_sec: 900
+  time_stop_minutes: 20
+  equity_curve_filter: true
+  equity_ma_period: 50
+
+vol_target:
+  enabled: true
+  target_daily_vol_pct: 2.0

@@ -3,12 +3,14 @@ from __future__ import annotations
 import os
 import sys
 import time
+from collections import deque
 from contextlib import ExitStack
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Deque, Dict, Optional
 
 import MetaTrader5 as mt5
+import numpy as np
 import yaml
 from dotenv import load_dotenv
 from loguru import logger
@@ -21,6 +23,16 @@ from .risk import Risk
 from .storage import DecisionRecord, Storage
 from .strategy import Policy, confirm_action, confirmations_ok
 from .utils import RateLimiter, now_utc_iso
+from src.model import EdgeModel
+
+
+edge = EdgeModel()
+loss_streak = 0
+post_loss_until = 0.0
+equity_ma: list[float] = []
+pending_samples: Deque[Dict[str, Any]] = deque(maxlen=1000)
+last_logged_bar: Optional[str] = None
+active_trade: Optional[Dict[str, Any]] = None
 
 
 def load_config(path: str = "config.yaml") -> Dict[str, Any]:
@@ -44,6 +56,7 @@ def timeframe_from_cfg(cfg: Dict[str, Any]):
 
 
 def run() -> None:
+    global loss_streak, post_loss_until, equity_ma, pending_samples, last_logged_bar, active_trade
     load_dotenv()
     cfg = load_config()
     setup_logging(os.getenv("LOG_DIR", "logs"))
@@ -101,10 +114,37 @@ def run() -> None:
                     time.sleep(1)
                     continue
 
+                cfgE = cfg.get("expectancy", {})
+                cfgR = cfg.get("risk_overlays", {})
+                horizon = int(cfgE.get("horizon_bars", 5))
+
+                m1_df = features.get("_m1_df")
+                if m1_df is not None and hasattr(m1_df, "empty") and not m1_df.empty:
+                    _process_pending_samples(m1_df, horizon)
+
                 positions = mt5_conn.positions(symbol)
+                if not positions and active_trade is not None:
+                    _handle_trade_close(active_trade, cfgR)
+
                 if positions:
+                    active_trade = {
+                        "ticket": getattr(positions[0], "ticket", None),
+                        "opened": datetime.utcfromtimestamp(getattr(positions[0], "time", 0)),
+                        "symbol": symbol,
+                        "features": features["m1"].copy(),
+                        "bar_time": m1_df.iloc[-1]["time"] if m1_df is not None and not m1_df.empty else None,
+                    }
                     state = build_management_state(mt5_conn, positions[0], features)
                     if state:
+                        ts_cfg = int(cfgR.get("time_stop_minutes", 0))
+                        if ts_cfg > 0:
+                            minutes_in_trade = state.get("time_in_trade_sec", 0.0) / 60.0
+                            if minutes_in_trade >= ts_cfg:
+                                ticket = getattr(positions[0], "ticket", None)
+                                if ticket is not None and mt5_conn.close_position(ticket):
+                                    logger.info("Time stop triggered for position {}", ticket)
+                                time.sleep(1)
+                                continue
                         executor.manage_with_ai(symbol, positions[0], state, ai)
                     time.sleep(1)
                     continue
@@ -113,6 +153,10 @@ def run() -> None:
                 if last_bar_ts and not policy.new_bar(last_bar_ts):
                     time.sleep(1)
                     continue
+
+                if last_bar_ts and last_bar_ts != last_logged_bar:
+                    _queue_sample(features["m1"], last_bar_ts)
+                    last_logged_bar = last_bar_ts
 
                 spread = int(features.get("meta", {}).get("spread_points", 0))
                 if not risk.within_spread(spread):
@@ -153,6 +197,37 @@ def run() -> None:
                         continue
                 else:
                     dd_pct = 0.0
+
+                if time.time() < post_loss_until:
+                    time.sleep(1)
+                    continue
+
+                if cfgR.get("equity_curve_filter", False):
+                    equity_ma.append(equity)
+                    period = int(cfgR.get("equity_ma_period", 0) or 0)
+                    max_keep = max(period * 4, 200) if period > 0 else 200
+                    if len(equity_ma) > max_keep:
+                        del equity_ma[: len(equity_ma) - max_keep]
+                    if period > 0 and len(equity_ma) >= period:
+                        ma = float(np.mean(equity_ma[-period:]))
+                        if equity < ma:
+                            time.sleep(1)
+                            continue
+
+                feats = features["m1"]
+                gate_enabled = bool(cfgE.get("enabled", True))
+                if gate_enabled:
+                    p_down, p_up = edge.predict_proba(feats)
+                    want_long = p_up >= float(cfgE.get("threshold_long", 0.55))
+                    want_short = p_down >= float(cfgE.get("threshold_short", 0.55))
+                    min_ev = float(cfgE.get("min_expected_rr", 0.0))
+                    edge_spread = max(p_up, p_down) - min(p_up, p_down)
+                    if edge_spread <= min_ev:
+                        want_long = False
+                        want_short = False
+                    if not (want_long or want_short):
+                        time.sleep(1)
+                        continue
 
                 if not limiter.allow(now=loop_start):
                     time.sleep(1)
@@ -230,6 +305,88 @@ def run() -> None:
             logger.info("Bot stopped")
 
 
+def _queue_sample(feats: Dict[str, Any], bar_time: str) -> None:
+    if not bar_time:
+        return
+    sample = {
+        "time": bar_time,
+        "features": feats.copy(),
+    }
+    pending_samples.append(sample)
+
+
+def _process_pending_samples(m1_df, horizon: int) -> None:
+    if horizon <= 0 or m1_df is None or not hasattr(m1_df, "empty") or m1_df.empty:
+        return
+    try:
+        times = m1_df["time"].astype(str)
+        closes = m1_df["close"].to_numpy(dtype=float)
+    except Exception:  # noqa: BLE001
+        return
+
+    new_queue: Deque[Dict[str, Any]] = deque(maxlen=pending_samples.maxlen)
+    for sample in list(pending_samples):
+        sample_time = sample.get("time")
+        if not sample_time:
+            continue
+        mask = times == sample_time
+        idx = np.flatnonzero(mask.to_numpy()) if hasattr(mask, "to_numpy") else np.array([], dtype=int)
+        if idx.size == 0:
+            continue
+        entry_idx = int(idx[-1])
+        future_idx = entry_idx + horizon
+        if future_idx < len(closes):
+            entry_close = closes[entry_idx]
+            future_close = closes[future_idx]
+            if entry_close > 0:
+                ret_h = (future_close / entry_close) - 1.0
+                label_up = 1 if ret_h > 0 else 0
+                edge.partial_fit(sample["features"], label_up)
+        else:
+            new_queue.append(sample)
+
+    pending_samples.clear()
+    pending_samples.extend(new_queue)
+
+
+def _handle_trade_close(trade_ctx: Dict[str, Any], cfgR: Dict[str, Any]) -> None:
+    global active_trade, loss_streak, post_loss_until
+    ticket = trade_ctx.get("ticket")
+    pnl = _fetch_trade_pnl(ticket, trade_ctx.get("opened"))
+    if pnl is not None:
+        if pnl < 0:
+            loss_streak += 1
+            max_losses = int(cfgR.get("max_consecutive_losses", 0) or 0)
+            if max_losses > 0 and loss_streak >= max_losses:
+                cooldown = int(cfgR.get("post_loss_cooldown_sec", 0) or 0)
+                if cooldown > 0:
+                    post_loss_until = time.time() + cooldown
+                loss_streak = 0
+        else:
+            loss_streak = 0
+        logger.info("Trade {} closed with pnl {:.2f}", ticket, pnl)
+    active_trade = None
+
+
+def _fetch_trade_pnl(ticket: Optional[int], opened_time: Optional[datetime]) -> Optional[float]:
+    if ticket is None:
+        return None
+    end = datetime.now()
+    start = end - timedelta(days=2)
+    if isinstance(opened_time, datetime):
+        start = min(start, opened_time - timedelta(hours=1))
+    try:
+        deals = mt5.history_deals_get(start, end, position=ticket)
+    except Exception:  # noqa: BLE001
+        return None
+    if not deals:
+        return None
+    pnl = 0.0
+    for deal in deals:
+        pnl += float(getattr(deal, "profit", 0.0) or 0.0)
+    return pnl
+
+
 def _ai_payload(
     features: Dict[str, Any],
     account: Dict[str, float],
@@ -252,6 +409,8 @@ def _ai_payload(
             "r1": features["m1"].get("r1"),
             "r3": features["m1"].get("r3"),
             "r10": features["m1"].get("r10"),
+            "vol_z": features["m1"].get("vol_z"),
+            "spread_points": features["m1"].get("spread_points"),
         },
         "spread_points": features.get("meta", {}).get("spread_points"),
         "meta": {
