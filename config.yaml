@@ -27,7 +27,7 @@ exits:
 clamps:
   atr_mult: 3
   min_points: 150
-  max_points: 3000
+  max_points: 6000     # was 3000; allow TP beyond min to reach RR>=1.5
 
 safety:
   daily_max_loss_pct: 5.0
